@@ -64,15 +64,45 @@ class StudioServer:
         self.queue: queue.Queue[Job] = queue.Queue()
         self.current: Job | None = None
         self._next = 1
+        self._submit_lock = threading.Lock()
         logging.getLogger().addHandler(_JobLog(self))
         threading.Thread(target=self._worker, name="studio-worker", daemon=True).start()
 
+    def submit_many(self, params: dict, count: int = 1) -> list[Job]:
+        if not isinstance(count, int) or isinstance(count, bool) or not 1 <= count <= 20:
+            raise ValueError("Video sayısı 1–20 arasında olmalıdır.")
+        if self.settings.free_mode:
+            from .factory import validate_free_settings
+            if params.get("action") == "upload" or params.get("offline"):
+                raise ValueError("Bu işlem fabrika panelinde kullanılamaz.")
+            duration = int(params.get("duration") or self.settings.target_seconds)
+            validate_free_settings(self.settings.with_overrides(
+                llm_provider=params.get("provider") or self.settings.llm_provider,
+                llm_model=params.get("model") or self.settings.llm_model,
+                language=params.get("language") or self.settings.language,
+                tts_engine=params.get("tts") or self.settings.tts_engine,
+                tts_voice=params.get("voice") or self.settings.tts_voice,
+                target_seconds=duration), source=params.get("source"), upload=params.get("upload"))
+            if params.get("style") not in (None, "", "facts", "story", "listicle", "myth", "quiz", "explainer", "motivational"):
+                raise ValueError("Geçersiz anlatım biçimi.")
+            if params.get("caption_style") not in (None, "", "bold", "boxed", "neon", "clean", "karaoke", "minimal"):
+                raise ValueError("Geçersiz altyazı biçimi.")
+            if not isinstance(params.get("topic") or "", str) or len(params.get("topic") or "") > 500:
+                raise ValueError("Konu en fazla 500 karakter olmalıdır.")
+        with self._submit_lock:
+            if self.queue.qsize() + count > 50:
+                raise ValueError("Kuyruk dolu; devam eden işlerin bitmesini bekleyin.")
+            jobs = []
+            for _ in range(count):
+                job = Job(self._next, dict(params))
+                self._next += 1
+                self.jobs[job.id] = job
+                self.queue.put(job)
+                jobs.append(job)
+            return jobs
+
     def submit(self, params: dict) -> Job:
-        job = Job(self._next, params)
-        self._next += 1
-        self.jobs[job.id] = job
-        self.queue.put(job)
-        return job
+        return self.submit_many(params)[0]
 
     def _worker(self) -> None:
         from .pipeline import Studio
@@ -121,7 +151,7 @@ class StudioServer:
         return out
 
     def file_for(self, vid: int, name: str) -> Path | None:
-        if name not in ("short.mp4", "cover.jpg", "captions.srt", "metadata.json"):
+        if name not in ("short.mp4", "cover.jpg", "captions.srt", "metadata.json", "script.json"):
             return None
         rec = self.studio.history.get(vid)
         if not rec or not rec["folder"]:
@@ -136,6 +166,10 @@ class StudioServer:
             llm = f"{resolve_provider_name(s)}{(':' + s.llm_model) if s.llm_model else ''}"
         except LLMError:
             llm = "not configured (demo mode only)"
+        if s.free_mode:
+            from .factory import diagnostics
+            return {"version": __version__, "llm": llm, "tts": s.tts_engine,
+                    "resolution": f"{s.width}x{s.height}", "checks": diagnostics(s)}
         return {"version": __version__, "llm": llm, "tts": s.tts_engine, "voice": s.tts_voice or "auto",
                 "visuals": ", ".join(s.visual_sources), "upload": s.upload, "privacy": s.privacy,
                 "quota_left": self.studio.quota_left(), "language": s.language,
@@ -166,7 +200,11 @@ def _handler(app: StudioServer):
         def do_GET(self):
             path = self.path.split("?", 1)[0]
             if path == "/":
-                html = PAGE.replace("__TOKEN__", app.token).replace("__VERSION__", __version__)
+                page = PAGE
+                if app.settings.free_mode:
+                    from .factory_ui import PAGE as factory_page
+                    page = factory_page
+                html = page.replace("__TOKEN__", app.token).replace("__VERSION__", __version__)
                 return self._send(200, html.encode(), "text/html; charset=utf-8",
                                   {"Content-Security-Policy": "default-src 'self'; style-src 'unsafe-inline'; "
                                    "script-src 'unsafe-inline'; img-src 'self' data:; media-src 'self'"})
@@ -228,18 +266,27 @@ def _handler(app: StudioServer):
         def do_POST(self):
             if self.headers.get("X-Studio-Token") != app.token:
                 return self._json({"error": "bad token"}, 403)
-            length = min(int(self.headers.get("Content-Length") or 0), 64 * 1024)
             try:
+                length = int(self.headers.get("Content-Length") or 0)
+                if not 0 <= length <= 64 * 1024:
+                    return self._json({"error": "İstek çok büyük."}, 413)
                 body = json.loads(self.rfile.read(length) or b"{}")
-            except json.JSONDecodeError:
-                return self._json({"error": "bad json"}, 400)
+                if not isinstance(body, dict):
+                    raise ValueError("JSON nesnesi gerekli.")
+            except (ValueError, UnicodeDecodeError):
+                return self._json({"error": "Geçersiz istek."}, 400)
             if self.path == "/api/make":
-                job = app.submit({k: body.get(k) for k in (
-                    "topic", "source", "style", "language", "voice", "tts", "caption_style", "duration",
-                    "provider", "model", "upload", "offline")})
-                return self._json({"job": job.id})
+                try:
+                    jobs = app.submit_many({k: body.get(k) for k in (
+                        "topic", "source", "style", "language", "voice", "tts", "caption_style", "duration",
+                        "provider", "model", "upload", "offline")}, body.get("count", 1))
+                except (ValueError, TypeError) as e:
+                    return self._json({"error": str(e)}, 400)
+                return self._json({"job": jobs[0].id, "jobs": [j.id for j in jobs]})
             m = re.fullmatch(r"/api/upload/(\d+)", self.path)
             if m:
+                if app.settings.free_mode:
+                    return self._json({"error": "Fabrika modunda yükleme kapalı."}, 403)
                 job = app.submit({"action": "upload", "id": int(m.group(1))})
                 return self._json({"job": job.id})
             self._json({"error": "not found"}, 404)

@@ -67,6 +67,8 @@ def final_title(script: Script) -> str:
 def final_description(script: Script, credits: set[str], settings: Settings) -> str:
     parts = [script.description.strip()] if script.description.strip() else []
     parts.append(" ".join(script.hashtags))
+    if settings.free_mode:
+        parts.append("Bu videoda yapay zekâ ile üretilmiş seslendirme kullanılmıştır.")
     if settings.credit_footage and credits:
         parts.append("Footage: " + ", ".join(sorted(credits)))
     return "\n\n".join(p for p in parts if p)
@@ -74,6 +76,9 @@ def final_description(script: Script, credits: set[str], settings: Settings) -> 
 
 class Studio:
     def __init__(self, settings: Settings):
+        if settings.free_mode:
+            from .factory import validate_free_settings
+            validate_free_settings(settings)
         self.s = settings
         self.history = History(settings.data_path / "history.db")
         self._llm: LLM | None = None
@@ -92,9 +97,9 @@ class Studio:
     # ------------------------------------------------------------------ voice with fallbacks
     def _speak(self, text: str, work: Path) -> tts.Speech:
         engines = [self.s.tts_engine]
-        if self.s.tts_engine != "edge":
+        if self.s.tts_engine != "edge" and not self.s.free_mode:
             engines.append("edge")
-        if self.s.offline:
+        if self.s.offline and not self.s.free_mode:
             engines += ["system", "silent"]
         last: Exception | None = None
         for eng in dict.fromkeys(engines):
@@ -114,6 +119,9 @@ class Studio:
         upload = s.upload if upload is None else upload
         folder = None
         try:
+            if s.free_mode:
+                from .factory import validate_free_settings
+                validate_free_settings(s, source=source, upload=upload)
             if script_file:  # your own (or an edited) script: no topic picking, no LLM call
                 script = load_script(script_file, s)
                 pick = Topic(script.topic, "script")
@@ -126,11 +134,11 @@ class Studio:
                                       avoid=self.history.recent_titles(), context=pick.context, style=style)
                 writer = self.llm.label if self.llm else "offline"
 
-            stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
             folder = (s.out_path / f"{stamp}_{slugify(script.title)}").resolve()  # absolute: history outlives cwd
             work = folder / "work"
             work.mkdir(parents=True, exist_ok=True)
-            (folder / "script.json").write_text(json.dumps(script.to_dict(), indent=2, ensure_ascii=False))
+            (folder / "script.json").write_text(json.dumps(script.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
 
             speech = self._speak(script.narration, work)
             total = round(speech.duration + END_PAD, 3)
@@ -165,7 +173,7 @@ class Studio:
                 "visuals": [{"source": m.source, "id": m.id, "kind": m.kind, "query": m.query} for m in media],
                 "created_at": now_iso(),
             }
-            (folder / "metadata.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False))
+            (folder / "metadata.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
 
             rid = self.history.add_video(
                 subject=pick.subject, source=pick.source, topic=script.topic, style=script.style,
@@ -195,6 +203,8 @@ class Studio:
         return self.s.daily_upload_limit - self.history.uploads_since(quota_day_start())
 
     def upload_record(self, rid: int, result: Result | None = None) -> str:
+        if self.s.free_mode:
+            raise ValueError("Ücretsiz fabrika modunda yükleme kapalı; videoyu önce kontrol edin.")
         rec = self.history.get(rid)
         if not rec or not rec.get("video_path") or not Path(rec["video_path"]).exists():
             log.error("Video #%s has no file to upload", rid)
@@ -206,7 +216,7 @@ class Studio:
                 result.status = "queued"
             return "queued"
         folder = Path(rec["folder"])
-        meta = json.loads((folder / "metadata.json").read_text()) if (folder / "metadata.json").exists() else {}
+        meta = json.loads((folder / "metadata.json").read_text(encoding="utf-8")) if (folder / "metadata.json").exists() else {}
         publish = youtube.next_publish_slot(self.s, self.history.scheduled_times())
         body = youtube.build_body(self.s, rec["title"], rec["description"] or "",
                                   json.loads(rec["tags"] or "[]"), meta.get("category_id", "27"),

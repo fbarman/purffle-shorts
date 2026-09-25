@@ -47,6 +47,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+local = ["supertonic @ https://github.com/supertone-oss-archive/supertonic-py/archive/df0f9686dac7fbbde391b759e2ee5286a3737622.zip"]
 whisper = ["faster-whisper>=1.0"]
 kokoro = ["kokoro>=0.9", "soundfile>=0.12"]
 coqui = ["coqui-tts>=0.24"]
@@ -54,6 +55,7 @@ dev = ["pytest>=8", "ruff>=0.5"]
 
 [project.scripts]
 purffle-shorts = "purffle_shorts.cli:main"
+purffle-fabrika = "purffle_shorts.factory:main"
 
 [project.urls]
 Homepage = "https://purffle.com/purffle-shorts/"

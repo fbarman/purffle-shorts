@@ -123,7 +123,8 @@ def pick_style(settings: Settings, source: str) -> str:
 
 def build_prompt(subject: str, style: str, settings: Settings, avoid: list[str], context: str = "") -> tuple[str, str]:
     lang = LANGUAGES.get(settings.language, settings.language)
-    words = int(settings.target_seconds * WORDS_PER_SECOND)
+    words_per_second = 1.9 if settings.language.split("-")[0] == "tr" else WORDS_PER_SECOND
+    words = int(settings.target_seconds * words_per_second)
     n_scenes = max(4, min(10, round(settings.target_seconds / 5.5)))
     system = (
         "You are a top YouTube Shorts scriptwriter and editor. You write fast, factual, highly "
@@ -156,6 +157,11 @@ Language: {lang} for narration, title, hook_text and description. search_query a
 - category: one of {", ".join(CATEGORIES)}.
 
 Return JSON with keys: topic, title, hook_text, scenes (array of {{narration, search_query, image_prompt}}), description, hashtags, tags, category."""
+    if settings.language.split("-")[0] == "tr":
+        system += (" Tüm anlatım, başlık, konu, açıklama ve etiketler doğal Türkçe olsun. "
+                   "Türkçe karakterleri koru. Sayıları seslendirmede yazıyla yaz. "
+                   "İngilizce kalıp kullanma; kısa, açık ve akıcı cümleler kur. "
+                   "Arama sorgusu ve görsel istemi İngilizce kalabilir.")
     return system, user
 
 

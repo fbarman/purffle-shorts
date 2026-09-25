@@ -84,7 +84,7 @@ def resolve_font(settings: Settings, style_font: str = "anton") -> tuple[Path | 
     if settings.caption_font and Path(settings.caption_font).exists():
         return Path(settings.caption_font), Path(settings.caption_font).stem
     key = font_key(settings.language, style_font)
-    path = ensure_font(key, settings.data_path)
+    path = None if settings.free_mode else ensure_font(key, settings.data_path)
     if path:
         return path, FONT_SOURCES[key][2]
     for cand in SYSTEM_BOLD:
@@ -160,10 +160,16 @@ def _rgba(hex_color: str, alpha: int = 255) -> tuple[int, int, int, int]:
     return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16), alpha
 
 
-def display_word(text: str, uppercase: bool) -> str:
+def upper_text(text: str, language: str = "") -> str:
+    if language.split("-")[0] == "tr":
+        text = text.translate(str.maketrans({"i": "İ", "ı": "I"}))
+    return text.upper()
+
+
+def display_word(text: str, uppercase: bool, language: str = "") -> str:
     t = text.strip().strip(",.;:\"“”()[]")
     t = t or text.strip()
-    return t.upper() if uppercase else t
+    return upper_text(t, language) if uppercase else t
 
 
 # ------------------------------------------------------------------------------------------ Pillow captions
@@ -283,7 +289,7 @@ class PillowCaptions:
                 t = until
 
         for ci, chunk in enumerate(chunks):
-            words = [display_word(w.text, self.s.caption_uppercase) for w in chunk.words]
+            words = [display_word(w.text, self.s.caption_uppercase, self.s.language) for w in chunk.words]
             if not any(words):
                 continue
             size = self.fit_size(words)
@@ -313,7 +319,7 @@ class PillowCaptions:
             lines += [f"file '{name}'", f"duration {dur:.4f}"]
         lines.append(f"file '{entries[-1][0]}'")  # concat demuxer quirk: repeat the last file
         playlist = out_dir / "captions.ffconcat"
-        playlist.write_text("\n".join(lines) + "\n")
+        playlist.write_text("\n".join(lines) + "\n", encoding="utf-8")
         log.info("Captions: %d states rendered (%s style)", n, self.s.caption_style)
         return playlist
 
@@ -322,7 +328,7 @@ class PillowCaptions:
 def _text_box(settings: Settings, font_path: Path | None, text: str, *, size_ratio: float, fill: str,
               box: str | None, box_alpha: int, max_lines: int = 3, uppercase: bool = True) -> Image.Image:
     W = settings.width
-    text = text.upper() if uppercase else text
+    text = upper_text(text, settings.language) if uppercase else text
     size = int(W * size_ratio)
     max_w = int(W * 0.80)
     for _ in range(10):
@@ -430,7 +436,7 @@ def write_ass(settings: Settings, style: CapStyle, family: str, chunks: list[Chu
     active_c = _ass_color(style.active) if style.active else None
     big = int(style.active_scale * 100)
     for chunk in chunks:
-        words = [_ass_escape(display_word(w.text, settings.caption_uppercase)) for w in chunk.words]
+        words = [_ass_escape(display_word(w.text, settings.caption_uppercase, settings.language)) for w in chunk.words]
         states = range(len(words)) if (style.active or style.spoken) else [None]
         for k in states:
             start = chunk.start if k in (0, None) else chunk.words[k].start
@@ -452,7 +458,7 @@ def write_ass(settings: Settings, style: CapStyle, family: str, chunks: list[Chu
                          f"{{\\pos({W // 2},{cy})}}{blur}{pop}{joiner.join(parts)}")
     if hook:
         lines.append(f"Dialogue: 2,{_ass_time(0)},{_ass_time(hook_until)},Hook,,0,0,0,,{{\\fad(150,300)}}"
-                     f"{_ass_escape(hook.upper())}")
+                     f"{_ass_escape(upper_text(hook, settings.language))}")
     if cta:
         lines.append(f"Dialogue: 2,{_ass_time(cta_from)},{_ass_time(total)},Cta,,0,0,0,,{{\\fad(250,0)}}"
                      f"{_ass_escape(cta)}")

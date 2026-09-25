@@ -1,7 +1,7 @@
 """Text-to-speech engines. Every engine returns audio plus per-word timings (native when the engine
 provides them, otherwise from an aligner or an estimate) so captions land exactly on the voice.
 
-  edge        Microsoft neural voices — free, no key, 320+ voices in 75 languages, native word timings (default)
+  supertonic  Supertonic 3 — local Turkish neural voice, no GPU required\n  edge        Microsoft neural voices — free, no key, 320+ voices in 75 languages, native word timings (default)
   openai      OpenAI gpt-4o-mini-tts / tts-1-hd (OPENAI_API_KEY)
   elevenlabs  ElevenLabs premium voices, native timings (ELEVENLABS_API_KEY)
   kokoro      Kokoro-82M open-weight model, runs locally (pip install kokoro soundfile)
@@ -199,6 +199,32 @@ def _coqui(text: str, out: Path, settings: Settings) -> tuple[Path, list[Word], 
     return path, [], model
 
 
+
+def _supertonic(text: str, out: Path, settings: Settings) -> tuple[Path, list[Word], str]:
+    """CPU-only Turkish speech from explicitly downloaded Supertonic 3 assets."""
+    try:
+        from supertonic import TTS
+    except ImportError as e:
+        raise PermanentError('Yerel ses motoru eksik. KURULUM.cmd dosyasını çalıştırın.') from e
+    root = Path(settings.tts_model)
+    if not (root / "onnx" / "tts.json").is_file():
+        raise PermanentError("Supertonic 3 modeli eksik. KURULUM.cmd dosyasını çalıştırın.")
+    voice_name = _pick_voice(settings, "M1")
+    path = out / "voice.wav"
+    with _model_lock:
+        key = f"supertonic-{root.resolve()}"
+        engine = _model_cache.get(key)
+        if engine is None:
+            engine = _model_cache[key] = TTS(model="supertonic-3", model_dir=root, auto_download=False)
+        style = engine.get_voice_style(voice_name=voice_name)
+        samples, _ = engine.synthesize(
+            text=text, lang="tr", voice_style=style, total_steps=8,
+            speed=max(0.7, min(2.0, _rate_multiplier(settings.tts_rate))),
+            max_chunk_length=200, silence_duration=0.15, verbose=False)
+        engine.save_audio(samples, str(path))
+    return path, [], voice_name
+
+
 def _system(text: str, out: Path, settings: Settings) -> tuple[Path, list[Word], str]:
     txt = out / "voice.txt"
     txt.write_text(text, encoding="utf-8")
@@ -210,8 +236,17 @@ def _system(text: str, out: Path, settings: Settings) -> tuple[Path, list[Word],
             cmd[1:1] = ["-v", voice]
     elif sys.platform.startswith("win"):
         raw = out / "voice.wav"
-        ps = ("Add-Type -AssemblyName System.Speech; $s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
-              f"$s.SetOutputToWaveFile('{raw}'); $s.Speak([IO.File]::ReadAllText('{txt}')); $s.Dispose()")
+        def ps_quote(value):
+            return "'" + str(value).replace("'", "''") + "'"
+        selector = (f"$s.SelectVoice({ps_quote(voice)}); " if voice else
+                    f"$s.SelectVoiceByHints([System.Speech.Synthesis.VoiceGender]::NotSet, "
+                    f"[System.Speech.Synthesis.VoiceAge]::NotSet, 0, "
+                    f"[System.Globalization.CultureInfo]::GetCultureInfo({ps_quote(settings.language)})); ")
+        ps = ("$ErrorActionPreference='Stop'; Add-Type -AssemblyName System.Speech; "
+              "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; try { "
+              + selector + f"$s.SetOutputToWaveFile({ps_quote(raw)}); "
+              f"$s.Speak([IO.File]::ReadAllText({ps_quote(txt)}, [Text.Encoding]::UTF8))"
+              + " } finally { $s.Dispose() }")
         cmd = ["powershell", "-NoProfile", "-Command", ps]
     else:
         raw = out / "voice.wav"
@@ -233,7 +268,7 @@ def _silent(text: str, out: Path, settings: Settings) -> tuple[Path, list[Word],
     return path, [], "silent"
 
 
-_ENGINE_FUNCS = {"edge": _edge, "openai": _openai, "elevenlabs": _elevenlabs, "kokoro": _kokoro,
+_ENGINE_FUNCS = {"supertonic": _supertonic, "edge": _edge, "openai": _openai, "elevenlabs": _elevenlabs, "kokoro": _kokoro,
                  "coqui": _coqui, "system": _system, "silent": _silent}
 
 
@@ -283,7 +318,12 @@ def _align(audio: Path, settings: Settings) -> tuple[list[Word], str]:
 
 def synthesize(text: str, out_dir: Path, settings: Settings) -> Speech:
     """Speak ``text`` and return audio + one timed Word per script token."""
-    engine = settings.tts_engine if settings.tts_engine in _ENGINE_FUNCS else "edge"
+    engine = settings.tts_engine
+    if engine not in _ENGINE_FUNCS:
+        raise PermanentError(f"Bilinmeyen ses motoru: {engine}")
+    if settings.free_mode:
+        from .factory import validate_free_settings
+        validate_free_settings(settings)
     out_dir.mkdir(parents=True, exist_ok=True)
     audio, native, voice = _ENGINE_FUNCS[engine](text, out_dir, settings)
     dur = ffmpeg.duration(audio)

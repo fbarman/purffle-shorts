@@ -232,7 +232,7 @@ def render_video(settings: Settings, media: list[MediaItem], scene_durations: li
                  total: float, plan: OverlayPlan, out: Path, work: Path) -> Path:
     T = settings.transition_seconds if settings.transition != "none" else 0.0
     lengths = segment_lengths(scene_durations, T)
-    workers = max(1, min(4, len(media)))
+    workers = max(1, min(settings.render_workers, len(media)))
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
         futs = [ex.submit(prepare_segment, m, L, i, settings, work) for i, (m, L) in enumerate(zip(media, lengths))]
         segments = [fu.result() for fu in futs]

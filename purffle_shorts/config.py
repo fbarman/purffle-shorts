@@ -152,6 +152,8 @@ class Settings:
     pixabay_api_key: str = ""
     elevenlabs_api_key: str = ""
 
+    free_mode: bool = False          # factory: only local Ollama and free voice/media
+    render_workers: int = 2
     offline: bool = False             # demo mode: no network LLM, generated visuals
 
     @property
