@@ -1,3 +1,9 @@
+# Factory Shorts
+
+Kurulumsuz Windows uygulaması, koyu tema ve yüklenen logo, konu başına üç video, referans dosya yükleme, yerel Ollama illüstrasyonları, özgün sentez müziği, popüler konu listesi ve otomatik üretim.
+
+Yeni taşınabilir sürüm için [PORTABLE-OKU.md](PORTABLE-OKU.md) belgesini okuyun. Aşağıdaki kurulum yönergeleri kaynak koddan çalıştırmak içindir.
+
 # PurffleShorts — Türkçe Video Fabrikası
 
 Windows'ta **Ollama + Supertonic 3 + FFmpeg** ile Türkçe, sesli, altyazılı dikey videolar üretir. API anahtarı, abonelik ve video başına ödeme gerekmez. İlk indirmelerden sonra varsayılan üretim akışı bilgisayarda çalışır.

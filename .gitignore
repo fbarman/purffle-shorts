@@ -51,3 +51,8 @@ factory.local.json
 # Misc
 *.txt
 !requirements.txt
+
+dist/
+build/
+*.spec
+PurffleShorts-Turkce-Windows.zip

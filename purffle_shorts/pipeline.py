@@ -122,6 +122,7 @@ class Studio:
             if s.free_mode:
                 from .factory import validate_free_settings
                 validate_free_settings(s, source=source, upload=upload)
+            log.info("FACTORY_STAGE: Senaryo hazırlanıyor")
             if script_file:  # your own (or an edited) script: no topic picking, no LLM call
                 script = load_script(script_file, s)
                 pick = Topic(script.topic, "script")
@@ -140,18 +141,32 @@ class Studio:
             work.mkdir(parents=True, exist_ok=True)
             (folder / "script.json").write_text(json.dumps(script.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
 
+            log.info("FACTORY_STAGE: Türkçe ses üretiliyor")
             speech = self._speak(script.narration, work)
             total = round(speech.duration + END_PAD, 3)
             timeline = scene_timeline([sc.narration for sc in script.scenes], speech.words, total, s.language)
             T = s.transition_seconds if s.transition != "none" else 0.0
             jobs = [(script.scenes[st.index].search_query, script.scenes[st.index].image_prompt, st.duration + T)
                     for st in timeline]
+            log.info("FACTORY_STAGE: Görseller hazırlanıyor")
             visuals = Visuals(s, self.history.used_media())
             media = visuals.for_scenes(jobs, script.topic, work / "media")
 
+            log.info("FACTORY_STAGE: Altyazılar hazırlanıyor")
             chunks = caption_chunks(speech.words, s.caption_max_words, total=total)
             plan = build_overlays(s, chunks, total, script.hook_text, work)
             video = folder / "short.mp4"
+            music_meta = None
+            if s.free_mode and s.factory_music != "off":
+                from .local_music import compose_music
+                log.info("FACTORY_STAGE: Müzik besteleniyor")
+                music_path = work / "original-music.wav"
+                mood = compose_music(script.topic, total, music_path, s.factory_music)
+                s = replace(s, music_file=str(music_path), music_dir=str(work / "no-external-music"), music_volume=0.22, music_ducking=True)
+                music_meta = {"source": "local-synthesis", "mood": mood, "samples": "none", "royalty_fee": 0}
+            elif s.free_mode:
+                s = replace(s, music_volume=0)
+            log.info("FACTORY_STAGE: Video birleştiriliyor")
             render_video(s, media, [st.duration for st in timeline], speech.audio, total, plan, video, work)
 
             info = ffmpeg.probe(video)
@@ -169,6 +184,7 @@ class Studio:
                 "topic": script.topic, "source": pick.source, "style": script.style,
                 "duration": round(info["duration"], 2), "resolution": f"{s.width}x{s.height}",
                 "llm": writer,
+                "music": music_meta,
                 "voice": f"{speech.engine}:{speech.voice}", "timing": speech.timing,
                 "visuals": [{"source": m.source, "id": m.id, "kind": m.kind, "query": m.query} for m in media],
                 "created_at": now_iso(),

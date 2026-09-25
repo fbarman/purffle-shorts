@@ -1,6 +1,7 @@
 """Full offline render: silent voice, generated backgrounds, real ffmpeg. No network needed."""
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -63,6 +64,9 @@ def test_turkish_factory_render_without_network(tmp_path, monkeypatch):
     s = factory_settings(root / "missing.json").with_overrides(
         tts_engine="silent", resolution=(360, 640), fps=24,
         data_dir=str(root / "data"), output_dir=str(root / "out"), media_dir=str(root / "media"))
+    from PIL import Image
+    Path(s.media_dir).mkdir()
+    Image.new("RGB", (360,640), "navy").save(Path(s.media_dir)/"reference.png")
     r = Studio(s).make(script_file=script)
     assert r.ok, r.error
     assert ffmpeg.probe(r.video)["has_audio"]

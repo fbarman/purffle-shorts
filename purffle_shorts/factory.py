@@ -41,7 +41,7 @@ def factory_settings(config_file: Path = CONFIG_FILE) -> Settings:
         align="none", visual_sources=["local"], resolution=(720, 1280), fps=25,
         transition="fade", caption_style="bold", caption_uppercase=False,
         caption_position="lower", end_cta="Daha fazlası için takip et!",
-        channel_name="Türkçe Video Fabrikası", watermark="Yapay zekâ seslendirmesi", upload=False, privacy="private", keep_videos=True,
+        channel_name="Factory Shorts", watermark="Yapay zekâ seslendirmesi", upload=False, privacy="private", keep_videos=True,
         timezone="Europe/Istanbul", workers=1, render_workers=2, batch_delay=0,
     ).with_overrides(**data)
     validate_free_settings(s)
@@ -116,7 +116,7 @@ def diagnostics(s: Settings, *, check_ollama: bool = True) -> list[dict]:
     media = Path(s.media_dir)
     count = sum(1 for p in media.rglob("*") if p.is_file() and p.suffix.lower() in {".mp4", ".png", ".jpg", ".jpeg", ".webp", ".mov", ".mkv", ".webm"}) if media.is_dir() else 0
     checks.append({"name": "Görseller", "ok": True, "detail": f"{count} yerel dosya" if count else
-                   "Medya klasörü boş: hareketli renkli arka planlar üretilecek."})
+                   "Medya yok: Ollama konuya özel yerel illüstrasyonlar tasarlayacak."})
     return checks
 
 

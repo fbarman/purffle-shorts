@@ -123,6 +123,7 @@ class Settings:
     music_file: str = "back.mp3"
     music_volume: float = 0.14
     music_ducking: bool = True
+    factory_music: str = "auto"
     loudness_lufs: float = -14.0
 
     # --- YouTube --------------------------------------------------------------------------

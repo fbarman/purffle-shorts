@@ -35,6 +35,7 @@ classifiers = [
 ]
 dependencies = [
     "requests>=2.31",
+    "numpy>=1.26",
     "python-dotenv>=1.0",
     "Pillow>=10.1",
     "edge-tts>=7.0",
@@ -76,3 +77,6 @@ ignore = ["E501", "B008", "B905"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.setuptools.package-data]
+purffle_shorts = ["assets/*"]

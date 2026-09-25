@@ -132,7 +132,7 @@ def server(factory, monkeypatch):
 def test_turkish_panel_batch_and_api_guards(server):
     app, base = server
     page = requests.get(base, timeout=5)
-    assert 'lang="tr"' in page.text and "Türkçe Video Fabrikası" in page.text
+    assert 'lang="tr"' in page.text and "Factory Shorts" in page.text
     assert "default-src 'self'" in page.headers["Content-Security-Policy"]
     assert requests.post(base + "/api/make", json={}, timeout=5).status_code == 403
     headers = {"X-Studio-Token": app.token}
@@ -157,8 +157,11 @@ def test_free_media_and_font_do_not_download(factory, monkeypatch, tmp_path):
     monkeypatch.setattr(media, "http", blocked)
     monkeypatch.setattr(overlays, "download", blocked)
     monkeypatch.setattr(overlays, "ensure_font", blocked)
+    monkeypatch.setattr(llm.LLM, "complete_json", lambda *a, **kw: {"scenes": [{"background":"#102030", "shapes":[
+        {"kind":"ellipse","color":"#abcdef","points":[100,100,300,300],"width":3} for _ in range(3)]}]})
     result = media.Visuals(factory).for_scenes([("ocean", "blue sea", 3)], "deniz", tmp_path)
-    assert result[0].source == "generated"
+    assert result[0].source == "ollama-illustration"
+    assert result[0].path.is_file()
     overlays.resolve_font(factory.with_overrides(caption_font=""))
 
 
