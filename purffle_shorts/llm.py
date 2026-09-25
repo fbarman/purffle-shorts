@@ -207,6 +207,45 @@ class OpenAICompatible(Provider):
         return content
 
 
+
+class OllamaProvider(Provider):
+    def __init__(self, model: str, base_url: str):
+        self.name, self.model = "ollama", model
+        self.base_url = base_url.rstrip("/").removesuffix("/v1")
+
+    def complete(self, system, user, *, schema=None, temperature=0.9, max_tokens=4000):
+        import requests
+        payload = {
+            "model": self.model, "stream": False, "keep_alive": 0,
+            "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+            "format": schema or "json",
+            "options": {"temperature": temperature, "num_ctx": 8192, "num_predict": max_tokens},
+        }
+        # Ignore HTTP proxy environment variables for the loopback-only factory.
+        with requests.Session() as session:
+            session.trust_env = False
+            check = session.post(self.base_url + "/api/show", json={"model": self.model},
+                                 timeout=(5, 30), allow_redirects=False)
+            if 300 <= check.status_code < 400:
+                raise LLMConfigError("Yerel Ollama başka bir adrese yönlendiremez.")
+            raise_for_status(check, "Ollama model kontrolü")
+            info = check.json()
+            if info.get("remote_model") or info.get("remote_host"):
+                raise LLMConfigError("Bulut bağlantılı model fabrika modunda kullanılamaz.")
+            r = session.post(self.base_url + "/api/chat", json=payload, timeout=(5, 900),
+                             allow_redirects=False)
+        if 300 <= r.status_code < 400:
+            raise LLMConfigError("Yerel Ollama başka bir adrese yönlendiremez.")
+        raise_for_status(r, "Ollama")
+        data = r.json()
+        if data.get("done_reason") == "length":
+            raise LLMError("Ollama yanıtı sınırı aştı; daha kısa bir video deneyin.")
+        content = (data.get("message") or {}).get("content")
+        if not isinstance(content, str) or not content.strip():
+            raise LLMError("Ollama boş yanıt döndürdü.")
+        return content
+
+
 class AnthropicProvider(Provider):
     """Native Claude via the official Anthropic SDK (structured JSON output + refusal fallbacks)."""
 
@@ -277,6 +316,8 @@ def build_provider(name: str, settings: Settings, model: str = "") -> Provider:
         base_url = settings.llm_base_url
     if not key and not preset.local and name != "custom":
         raise LLMConfigError(f"{preset.label}: set {' or '.join(preset.key_envs)} in .env")
+    if name == "ollama" and settings.free_mode:
+        return OllamaProvider(model, base_url)
     return OpenAICompatible(preset, model, key, base_url)
 
 
@@ -284,6 +325,9 @@ class LLM:
     """Primary provider + ordered fallbacks. ``complete_json`` returns a parsed dict."""
 
     def __init__(self, settings: Settings):
+        if settings.free_mode:
+            from .factory import validate_free_settings
+            validate_free_settings(settings)
         self.settings = settings
         primary = resolve_provider_name(settings)
         names = [primary] + [n for n in settings.llm_fallbacks if n != primary]

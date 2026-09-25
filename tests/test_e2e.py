@@ -1,6 +1,7 @@
 """Full offline render: silent voice, generated backgrounds, real ffmpeg. No network needed."""
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -46,3 +47,30 @@ def test_render_from_script_file_needs_no_llm(settings, tmp_path):
     meta = json.loads((r.folder / "metadata.json").read_text())
     assert meta["title"] == "Honey Never Spoils #shorts"
     assert meta["llm"] == "script file" and meta["source"] == "script"
+
+
+@needs_ffmpeg
+def test_turkish_factory_render_without_network(tmp_path, monkeypatch):
+    import requests
+
+    from purffle_shorts.factory import demo_script, factory_settings
+    def blocked(*args, **kwargs):
+        raise AssertionError("External network is disabled for the render test")
+    monkeypatch.setattr(requests.Session, "request", blocked)
+    root = tmp_path / "Türkçe üretim's"
+    root.mkdir()
+    script = root / "senaryo.json"
+    demo_script(script)
+    s = factory_settings(root / "missing.json").with_overrides(
+        tts_engine="silent", resolution=(360, 640), fps=24,
+        data_dir=str(root / "data"), output_dir=str(root / "out"), media_dir=str(root / "media"))
+    from PIL import Image
+    Path(s.media_dir).mkdir()
+    Image.new("RGB", (360,640), "navy").save(Path(s.media_dir)/"reference.png")
+    r = Studio(s).make(script_file=script)
+    assert r.ok, r.error
+    assert ffmpeg.probe(r.video)["has_audio"]
+    metadata = json.loads((r.folder / "metadata.json").read_text(encoding="utf-8"))
+    assert metadata["language"] == "tr" and metadata["llm"] == "script file"
+    assert "yapay zekâ" in metadata["description"]
+    assert "üç" in (r.folder / "captions.srt").read_text(encoding="utf-8").lower()

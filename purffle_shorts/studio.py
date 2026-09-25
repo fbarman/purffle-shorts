@@ -33,10 +33,11 @@ log = logging.getLogger("purffle")
 class Job:
     id: int
     params: dict
-    status: str = "queued"          # queued | running | done | failed
+    status: str = "queued"  # queued | running | done | failed
     log: list[str] = field(default_factory=list)
     result: dict = field(default_factory=dict)
     created: float = field(default_factory=time.time)
+    stage: str = "Sırada"
 
 
 class _JobLog(logging.Handler):
@@ -50,6 +51,8 @@ class _JobLog(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         job = self.studio.current
         if job is not None and record.threadName == "studio-worker":
+            if record.getMessage().startswith("FACTORY_STAGE: "):
+                job.stage = record.getMessage().split(": ", 1)[1]
             job.log.append(self.format(record))
             del job.log[:-200]
 
@@ -57,6 +60,7 @@ class _JobLog(logging.Handler):
 class StudioServer:
     def __init__(self, settings: Settings):
         from .pipeline import Studio
+
         self.settings = settings
         self.studio = Studio(settings)
         self.token = secrets.token_urlsafe(24)
@@ -64,21 +68,88 @@ class StudioServer:
         self.queue: queue.Queue[Job] = queue.Queue()
         self.current: Job | None = None
         self._next = 1
+        self._submit_lock = threading.Lock()
+        from .auto_factory import AutoFactory
+
+        self.auto = AutoFactory(self)
+        self.upload_root = self.settings.data_path / "references"
+        self.upload_lock = threading.Lock()
         logging.getLogger().addHandler(_JobLog(self))
         threading.Thread(target=self._worker, name="studio-worker", daemon=True).start()
 
+    def submit_many(self, params: dict, count: int = 1) -> list[Job]:
+        if not isinstance(count, int) or isinstance(count, bool) or not 1 <= count <= 20:
+            raise ValueError("Video sayısı 1–20 arasında olmalıdır.")
+        if self.settings.free_mode:
+            if count > 3:
+                raise ValueError("Konu başına en fazla 3 video üretilebilir.")
+            from .factory import validate_free_settings
+
+            if params.get("action") == "upload" or params.get("offline"):
+                raise ValueError("Bu işlem fabrika panelinde kullanılamaz.")
+            duration = int(params.get("duration") or self.settings.target_seconds)
+            validate_free_settings(
+                self.settings.with_overrides(
+                    llm_provider=params.get("provider") or self.settings.llm_provider,
+                    llm_model=params.get("model") or self.settings.llm_model,
+                    language=params.get("language") or self.settings.language,
+                    tts_engine=params.get("tts") or self.settings.tts_engine,
+                    tts_voice=params.get("voice") or self.settings.tts_voice,
+                    target_seconds=duration,
+                ),
+                source=params.get("source"),
+                upload=params.get("upload"),
+            )
+            if params.get("style") not in (
+                None,
+                "",
+                "facts",
+                "story",
+                "listicle",
+                "myth",
+                "quiz",
+                "explainer",
+                "motivational",
+            ):
+                raise ValueError("Geçersiz anlatım biçimi.")
+            if params.get("caption_style") not in (None, "", "bold", "boxed", "neon", "clean", "karaoke", "minimal"):
+                raise ValueError("Geçersiz altyazı biçimi.")
+            if not isinstance(params.get("topic") or "", str) or len(params.get("topic") or "") > 500:
+                raise ValueError("Konu en fazla 500 karakter olmalıdır.")
+        if params.get("music") not in (None, "auto", "off", "calm", "wonder", "bright", "dramatic"):
+            raise ValueError("Geçersiz müzik seçimi")
+        media_set = params.get("media_set") or ""
+        if media_set and (
+            not isinstance(media_set, str)
+            or not re.fullmatch(r"[a-f0-9]{32}", media_set)
+            or not (self.upload_root / media_set).is_dir()
+        ):
+            raise ValueError("Geçersiz medya grubu")
+        with self._submit_lock:
+            if self.queue.qsize() + count > 50:
+                raise ValueError("Kuyruk dolu; devam eden işlerin bitmesini bekleyin.")
+            jobs = []
+            for _ in range(count):
+                job = Job(self._next, dict(params))
+                self._next += 1
+                self.jobs[job.id] = job
+                self.queue.put(job)
+                jobs.append(job)
+            return jobs
+
     def submit(self, params: dict) -> Job:
-        job = Job(self._next, params)
-        self._next += 1
-        self.jobs[job.id] = job
-        self.queue.put(job)
-        return job
+        return self.submit_many(params)[0]
 
     def _worker(self) -> None:
         from .pipeline import Studio
+
         while True:
             job = self.queue.get()
             self.current, job.status = job, "running"
+            if job.params.get("automatic") and (not self.auto.enabled or time.time() - self.auto.last_seen >= 90):
+                job.status, job.stage = "cancelled", "Durduruldu"
+                self.current = None
+                continue
             p = job.params
             try:
                 if p.get("action") == "upload":
@@ -86,42 +157,69 @@ class StudioServer:
                     job.status = "done" if status in ("uploaded", "scheduled", "queued") else "failed"
                     job.result = {"status": status}
                     continue
-                overrides = {k: v for k, v in {
-                    "style": p.get("style") or None, "language": p.get("language") or None,
-                    "tts_voice": p.get("voice") or None, "tts_engine": p.get("tts") or None,
-                    "caption_style": p.get("caption_style") or None,
-                    "target_seconds": int(p["duration"]) if p.get("duration") else None,
-                    "llm_provider": p.get("provider") or None, "llm_model": p.get("model") or None,
-                }.items() if v is not None}
+                overrides = {
+                    k: v
+                    for k, v in {
+                        "style": p.get("style") or None,
+                        "language": p.get("language") or None,
+                        "tts_voice": p.get("voice") or None,
+                        "tts_engine": p.get("tts") or None,
+                        "caption_style": p.get("caption_style") or None,
+                        "target_seconds": int(p["duration"]) if p.get("duration") else None,
+                        "llm_provider": p.get("provider") or None,
+                        "llm_model": p.get("model") or None,
+                    }.items()
+                    if v is not None
+                }
+                if self.settings.free_mode:
+                    overrides["factory_music"] = p.get("music") or "auto"
+                    overrides["media_dir"] = str(self.upload_root / (p.get("media_set") or "empty"))
                 s = self.settings.with_overrides(**overrides)
                 if p.get("offline"):
                     s = replace(s, offline=True)
                 studio = self.studio if s == self.settings else Studio(s)
                 r = studio.make(p.get("topic") or None, source=p.get("source") or None, upload=bool(p.get("upload")))
                 job.status = "done" if r.ok else "failed"
-                job.result = {"ok": r.ok, "title": r.title, "status": r.status, "youtube_id": r.youtube_id,
-                              "error": r.error, "id": r.record_id}
+                job.result = {
+                    "ok": r.ok,
+                    "title": r.title,
+                    "status": r.status,
+                    "youtube_id": r.youtube_id,
+                    "error": r.error,
+                    "id": r.record_id,
+                }
             except Exception as e:
                 job.status, job.result = "failed", {"error": str(e)}
                 log.exception("Studio job %d failed", job.id)
             finally:
+                job.stage = "Tamamlandı" if job.status == "done" else "Başarısız"
+                if job.status == "failed" and p.get("automatic"):
+                    self.auto.set_enabled(False)
+                    self.auto.error = "Bir üretim başarısız oldu; kontrol edip otomatik üretimi yeniden başlatın."
                 self.current = None
 
     def videos(self) -> list[dict]:
         out = []
         for r in self.studio.history.recent(60):
             folder = Path(r["folder"]) if r["folder"] else None
-            out.append({
-                "id": r["id"], "title": r["title"], "status": r["status"], "created": r["created_at"],
-                "youtube_id": r["youtube_id"], "publish_at": r["publish_at"], "duration": r["duration"],
-                "has_video": bool(r["video_path"] and Path(r["video_path"]).exists()),
-                "has_cover": bool(folder and (folder / "cover.jpg").exists()),
-                "error": r["error"],
-            })
+            out.append(
+                {
+                    "id": r["id"],
+                    "title": r["title"],
+                    "status": r["status"],
+                    "created": r["created_at"],
+                    "youtube_id": r["youtube_id"],
+                    "publish_at": r["publish_at"],
+                    "duration": r["duration"],
+                    "has_video": bool(r["video_path"] and Path(r["video_path"]).exists()),
+                    "has_cover": bool(folder and (folder / "cover.jpg").exists()),
+                    "error": r["error"],
+                }
+            )
         return out
 
     def file_for(self, vid: int, name: str) -> Path | None:
-        if name not in ("short.mp4", "cover.jpg", "captions.srt", "metadata.json"):
+        if name not in ("short.mp4", "cover.jpg", "captions.srt", "metadata.json", "script.json"):
             return None
         rec = self.studio.history.get(vid)
         if not rec or not rec["folder"]:
@@ -132,14 +230,34 @@ class StudioServer:
     def info(self) -> dict:
         s = self.settings
         from .llm import LLMError, resolve_provider_name
+
         try:
             llm = f"{resolve_provider_name(s)}{(':' + s.llm_model) if s.llm_model else ''}"
         except LLMError:
             llm = "not configured (demo mode only)"
-        return {"version": __version__, "llm": llm, "tts": s.tts_engine, "voice": s.tts_voice or "auto",
-                "visuals": ", ".join(s.visual_sources), "upload": s.upload, "privacy": s.privacy,
-                "quota_left": self.studio.quota_left(), "language": s.language,
-                "caption_style": s.caption_style, "duration": s.target_seconds}
+        if s.free_mode:
+            from .factory import diagnostics
+
+            return {
+                "version": __version__,
+                "llm": llm,
+                "tts": s.tts_engine,
+                "resolution": f"{s.width}x{s.height}",
+                "checks": diagnostics(s),
+            }
+        return {
+            "version": __version__,
+            "llm": llm,
+            "tts": s.tts_engine,
+            "voice": s.tts_voice or "auto",
+            "visuals": ", ".join(s.visual_sources),
+            "upload": s.upload,
+            "privacy": s.privacy,
+            "quota_left": self.studio.quota_left(),
+            "language": s.language,
+            "caption_style": s.caption_style,
+            "duration": s.target_seconds,
+        }
 
 
 def _handler(app: StudioServer):
@@ -166,18 +284,44 @@ def _handler(app: StudioServer):
         def do_GET(self):
             path = self.path.split("?", 1)[0]
             if path == "/":
-                html = PAGE.replace("__TOKEN__", app.token).replace("__VERSION__", __version__)
-                return self._send(200, html.encode(), "text/html; charset=utf-8",
-                                  {"Content-Security-Policy": "default-src 'self'; style-src 'unsafe-inline'; "
-                                   "script-src 'unsafe-inline'; img-src 'self' data:; media-src 'self'"})
+                page = PAGE
+                if app.settings.free_mode:
+                    from .factory_ui import PAGE as factory_page
+
+                    page = factory_page
+                html = page.replace("__TOKEN__", app.token).replace("__VERSION__", __version__)
+                return self._send(
+                    200,
+                    html.encode(),
+                    "text/html; charset=utf-8",
+                    {
+                        "Content-Security-Policy": "default-src 'self'; style-src 'unsafe-inline'; "
+                        "script-src 'unsafe-inline'; img-src 'self' data:; media-src 'self'"
+                    },
+                )
+            if path == "/logo.jpg":
+                return self._file(Path(__file__).parent / "assets" / "logo.jpg")
+            if path == "/api/automatic":
+                return self._json(app.auto.snapshot())
             if path == "/api/info":
                 return self._json(app.info())
             if path == "/api/videos":
                 return self._json(app.videos())
             if path == "/api/jobs":
                 jobs = sorted(app.jobs.values(), key=lambda j: j.id, reverse=True)[:20]
-                return self._json([{"id": j.id, "status": j.status, "params": j.params, "result": j.result,
-                                    "log": j.log[-40:]} for j in jobs])
+                return self._json(
+                    [
+                        {
+                            "id": j.id,
+                            "status": j.status,
+                            "params": j.params,
+                            "result": j.result,
+                            "stage": j.stage,
+                            "log": j.log[-40:],
+                        }
+                        for j in jobs
+                    ]
+                )
             m = re.fullmatch(r"/files/(\d+)/([\w.]+)", path)
             if m:
                 f = app.file_for(int(m.group(1)), m.group(2))
@@ -225,21 +369,111 @@ def _handler(app: StudioServer):
                         return
                     left -= len(chunk)
 
+        def _reference(self):
+            import uuid
+            from urllib.parse import unquote
+
+            from PIL import Image
+
+            from . import ffmpeg
+
+            part = None
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+                if not 1 <= length <= 100 * 1024 * 1024:
+                    return self._json({"error": "Dosya sınırı 100 MB."}, 413)
+                name = unquote(self.headers.get("X-File-Name", ""))
+                ext = Path(name).suffix.lower()
+                if ext not in {".jpg", ".jpeg", ".png", ".webp", ".mp4", ".mov", ".mkv", ".webm"}:
+                    raise ValueError("Fotoğraf veya video seçin.")
+                group = self.headers.get("X-Media-Set") or uuid.uuid4().hex
+                if not re.fullmatch(r"[a-f0-9]{32}", group):
+                    raise ValueError("Geçersiz medya grubu")
+                with app.upload_lock:
+                    folder = app.upload_root / group
+                    folder.mkdir(parents=True, exist_ok=True)
+                    if len(list(folder.iterdir())) >= 10:
+                        raise ValueError("Bir konu için en fazla 10 referans yüklenebilir.")
+                    dest = folder / (uuid.uuid4().hex + ext)
+                    part = dest.with_suffix(ext + ".part")
+                    left = length
+                    self.connection.settimeout(60)
+                    with part.open("wb") as f:
+                        while left:
+                            chunk = self.rfile.read(min(left, 65536))
+                            if not chunk:
+                                raise ValueError("Dosya aktarımı tamamlanmadı")
+                            f.write(chunk)
+                            left -= len(chunk)
+                    if ext in {".jpg", ".jpeg", ".png", ".webp"}:
+                        with Image.open(part) as im:
+                            if im.width * im.height > 40_000_000:
+                                raise ValueError("Görsel çok büyük")
+                            im.verify()
+                    elif not ffmpeg.probe(part).get("has_video"):
+                        raise ValueError("Geçerli video bulunamadı")
+                    part.replace(dest)
+                return self._json({"media_set": group, "name": name[:150], "size": length})
+            except Exception as e:
+                if part:
+                    part.unlink(missing_ok=True)
+                self.close_connection = True
+                return self._json({"error": str(e)}, 400)
+
         def do_POST(self):
             if self.headers.get("X-Studio-Token") != app.token:
                 return self._json({"error": "bad token"}, 403)
-            length = min(int(self.headers.get("Content-Length") or 0), 64 * 1024)
+            if self.path == "/api/reference":
+                return self._reference()
             try:
+                length = int(self.headers.get("Content-Length") or 0)
+                if not 0 <= length <= 64 * 1024:
+                    return self._json({"error": "İstek çok büyük."}, 413)
                 body = json.loads(self.rfile.read(length) or b"{}")
-            except json.JSONDecodeError:
-                return self._json({"error": "bad json"}, 400)
+                if not isinstance(body, dict):
+                    raise ValueError("JSON nesnesi gerekli.")
+            except (ValueError, UnicodeDecodeError):
+                return self._json({"error": "Geçersiz istek."}, 400)
+            if self.path == "/api/heartbeat":
+                app.auto.ping()
+                return self._json({"ok": True})
+            if self.path == "/api/automatic":
+                try:
+                    app.auto.set_enabled(body.get("enabled"))
+                except ValueError as e:
+                    return self._json({"error": str(e)}, 400)
+                return self._json(app.auto.snapshot())
             if self.path == "/api/make":
-                job = app.submit({k: body.get(k) for k in (
-                    "topic", "source", "style", "language", "voice", "tts", "caption_style", "duration",
-                    "provider", "model", "upload", "offline")})
-                return self._json({"job": job.id})
+                try:
+                    jobs = app.submit_many(
+                        {
+                            k: body.get(k)
+                            for k in (
+                                "topic",
+                                "source",
+                                "style",
+                                "language",
+                                "voice",
+                                "tts",
+                                "caption_style",
+                                "duration",
+                                "provider",
+                                "model",
+                                "upload",
+                                "offline",
+                                "media_set",
+                                "music",
+                            )
+                        },
+                        body.get("count", 3 if app.settings.free_mode else 1),
+                    )
+                except (ValueError, TypeError) as e:
+                    return self._json({"error": str(e)}, 400)
+                return self._json({"job": jobs[0].id, "jobs": [j.id for j in jobs]})
             m = re.fullmatch(r"/api/upload/(\d+)", self.path)
             if m:
+                if app.settings.free_mode:
+                    return self._json({"error": "Fabrika modunda yükleme kapalı."}, 403)
                 job = app.submit({"action": "upload", "id": int(m.group(1))})
                 return self._json({"job": job.id})
             self._json({"error": "not found"}, 404)
@@ -250,6 +484,8 @@ def _handler(app: StudioServer):
 def serve(settings: Settings, host: str = "127.0.0.1", port: int = 8765, open_browser: bool = True) -> None:
     app = StudioServer(settings)
     httpd = ThreadingHTTPServer((host, port), _handler(app))
+    if settings.free_mode:
+        app.auto.start()
     url = f"http://{host}:{port}/"
     log.info("PurffleShorts Studio running at %s  (Ctrl+C to stop)", url)
     if host not in ("127.0.0.1", "localhost"):
@@ -261,6 +497,7 @@ def serve(settings: Settings, host: str = "127.0.0.1", port: int = 8765, open_br
     except KeyboardInterrupt:
         pass
     finally:
+        app.auto.stop.set()
         httpd.server_close()
 
 

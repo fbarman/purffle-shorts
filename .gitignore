@@ -41,6 +41,18 @@ music/
 Thumbs.db
 desktop.ini
 
+# Local factory tools and models
+.tools/
+models/
+factory.local.json
+.pytest_cache/
+.ruff_cache/
+
 # Misc
 *.txt
 !requirements.txt
+
+dist/
+build/
+*.spec
+PurffleShorts-Turkce-Windows.zip

@@ -123,6 +123,7 @@ class Settings:
     music_file: str = "back.mp3"
     music_volume: float = 0.14
     music_ducking: bool = True
+    factory_music: str = "auto"
     loudness_lufs: float = -14.0
 
     # --- YouTube --------------------------------------------------------------------------
@@ -152,6 +153,8 @@ class Settings:
     pixabay_api_key: str = ""
     elevenlabs_api_key: str = ""
 
+    free_mode: bool = False          # factory: only local Ollama and free voice/media
+    render_workers: int = 2
     offline: bool = False             # demo mode: no network LLM, generated visuals
 
     @property

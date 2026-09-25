@@ -221,13 +221,13 @@ class Visuals:
         root = Path(self.s.media_dir)
         if not root.is_dir():
             return []
-        words = set(simplify_query(query).split()) | set(query.lower().split())
+        words = set(simplify_query(query).split()) | set(re.findall(r"[^\W\d_]+", query.casefold()))
         items = []
         for p in root.rglob("*"):
             ext = p.suffix.lower()
             if ext not in VIDEO_EXT | IMAGE_EXT:
                 continue
-            stem = set(re.findall(r"[a-z]+", p.stem.lower()))
+            stem = set(re.findall(r"[^\W\d_]+", p.stem.casefold()))
             item = MediaItem("local", str(p), "video" if ext in VIDEO_EXT else "image", path=p, query=query)
             item.extra["overlap"] = len(words & stem)
             items.append(item)
@@ -305,6 +305,13 @@ class Visuals:
     def for_scenes(self, jobs: list[tuple[str, str, float]], topic: str, dest_dir: Path) -> list[MediaItem]:
         """jobs: [(search_query, image_prompt, seconds_needed)] -> one MediaItem per scene."""
         dest_dir.mkdir(parents=True, exist_ok=True)
+        if self.s.free_mode:
+            local = self._local(topic)
+            if local:
+                # Explicit references may repeat; never replace them with unrelated visuals.
+                return [local[i % len(local)] for i in range(len(jobs))]
+            from .illustrations import generate
+            return generate(self.s, jobs, topic, dest_dir)
         workers = 2 if any(s in ("openai-images", "ai", "pollinations") for s in self.sources) else 4
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
             futs = [ex.submit(self.for_scene, i, q, p, topic, need, dest_dir) for i, (q, p, need) in enumerate(jobs)]
